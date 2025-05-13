@@ -1,9 +1,4 @@
-/**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
- */
+// Read comments
 
 import React, {useEffect, useState} from 'react';
 import type {PropsWithChildren} from 'react';
@@ -20,27 +15,10 @@ import {
   TouchableOpacity,
 } from 'react-native';
 
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
 import notifee from '@notifee/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import {
-  ScreenCapturePickerView,
-  RTCPeerConnection,
-  RTCIceCandidate,
-  RTCSessionDescription,
-  RTCView,
-  MediaStream,
-  MediaStreamTrack,
-  mediaDevices,
-  registerGlobals,
-} from 'react-native-webrtc';
+import {RTCView, mediaDevices, registerGlobals} from 'react-native-webrtc';
 import {
   createNotificationChannels,
   showDisplayProjectionNotificaion,
@@ -61,12 +39,20 @@ function App(): React.JSX.Element {
 
   const produceScreenMedia = async () => {
     const projection_perm = await AsyncStorage.getItem('display_media_perm');
+
+    /// try commenting this "if" block. the app will crash for the first time.
+
+    // if you successfully share your screen atleast one time. we wont get any crashes.
+
     if (!projection_perm) {
       const tempStream = await mediaDevices.getDisplayMedia();
       tempStream.release();
       await AsyncStorage.setItem('display_media_perm', JSON.stringify(true));
     }
 
+    // The crash is happening while showing the foreground notification.
+    // checkout AndroidManifest.xml file ,
+    //  refer: https://react-native-webrtc.github.io/handbook/guides/extra-steps/android.html
     await showDisplayProjectionNotificaion();
 
     const screenStream = await mediaDevices.getDisplayMedia();

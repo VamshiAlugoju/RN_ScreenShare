@@ -1,6 +1,6 @@
 // Read comments
 
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useState, useCallback} from 'react';
 import type {PropsWithChildren} from 'react';
 import {
   ScrollView,
@@ -28,6 +28,26 @@ registerGlobals();
 
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
+  const [url, setUrl] = useState<null | string>(null);
+  const [stream, setStream] = useState<any>(null);
+
+  // Cleanup function for screen sharing
+  const cleanupScreenSharing = useCallback(async () => {
+    if (stream) {
+      console.log('Cleaning up screen sharing...');
+      stream.getTracks().forEach((track: any) => track.stop());
+      setStream(null);
+      setUrl(null);
+      await stopForegroundService();
+    }
+  }, [stream]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      cleanupScreenSharing();
+    };
+  }, [cleanupScreenSharing]);
 
   const requestPermission = async () => {
     await requestCameraPermission();
@@ -35,31 +55,62 @@ function App(): React.JSX.Element {
     await requestNotificationPermission();
   };
 
-  const [url, setUrl] = useState<null | string>(null);
-
   const produceScreenMedia = async () => {
-    const projection_perm = await AsyncStorage.getItem('display_media_perm');
+    try {
+      // Clean up existing stream
+      await cleanupScreenSharing();
+      
+      // First ensure we have notification permission
+      await requestNotificationPermission();
+      
+      // Show the foreground notification
+      await showDisplayProjectionNotificaion();
 
-    /// try commenting this "if" block. the app will crash for the first time.
+      console.log('Requesting screen share permission...');
+      const screenStream = await mediaDevices.getDisplayMedia();
+      setStream(screenStream);
+      
+      const videoTrack = screenStream.getVideoTracks()[0];
+      if (!videoTrack) {
+        throw new Error('No video track available');
+      }
 
-    // if you successfully share your screen atleast one time. we wont get any crashes.
+      console.log('Got video track, state:', videoTrack.readyState);
+      videoTrack.enabled = true;
 
-    if (!projection_perm) {
-      const tempStream = await mediaDevices.getDisplayMedia();
-      tempStream.release();
-      await AsyncStorage.setItem('display_media_perm', JSON.stringify(true));
+      const streamUrl = screenStream.toURL();
+      console.log('Stream URL created:', streamUrl);
+      setUrl(streamUrl);
+
+      // Monitor track state
+      const checkTrackInterval = setInterval(() => {
+        if (!videoTrack || videoTrack.readyState === 'ended') {
+          console.log('Track ended, cleaning up...');
+          clearInterval(checkTrackInterval);
+          cleanupScreenSharing();
+        }
+      }, 1000);
+
+      return () => {
+        clearInterval(checkTrackInterval);
+        cleanupScreenSharing();
+      };
+
+    } catch (error) {
+      console.error('Error in screen sharing:', error);
+      await cleanupScreenSharing();
     }
+  };
 
-    // The crash is happening while showing the foreground notification.
-    // checkout AndroidManifest.xml file ,
-    //  refer: https://react-native-webrtc.github.io/handbook/guides/extra-steps/android.html
-    await showDisplayProjectionNotificaion();
-
-    const screenStream = await mediaDevices.getDisplayMedia();
-    const videoTrack = screenStream.getVideoTracks()[0];
-    const url = screenStream.toURL();
-    setUrl(url);
-    console.log('screen shareing started======>>>>>>');
+  const showNotificationWithoutScreenShare = async () => {
+    try {
+      // First ensure we have notification permission
+      await requestNotificationPermission();
+      await showDisplayProjectionNotificaion();
+    } catch (error) {
+      console.error('Error showing notification:', error);
+      await stopForegroundService();
+    }
   };
 
   useEffect(() => {
@@ -92,9 +143,7 @@ function App(): React.JSX.Element {
       </TouchableOpacity>
 
       <TouchableOpacity
-        onPress={async () => {
-          await showDisplayProjectionNotificaion();
-        }}
+        onPress={showNotificationWithoutScreenShare}
         style={{
           backgroundColor: 'blue',
           padding: 10,
@@ -103,8 +152,7 @@ function App(): React.JSX.Element {
           alignSelf: 'center',
         }}>
         <Text style={{color: 'white'}}>
-          show foreground notification without ScreenSharing intent (App may
-          crash){' '}
+          show foreground notification without ScreenSharing intent
         </Text>
       </TouchableOpacity>
 
@@ -131,16 +179,28 @@ function App(): React.JSX.Element {
         }}>
         <Text style={{color: 'white'}}>reset notification</Text>
       </TouchableOpacity>
-      {url && (
-        <RTCView
-          streamURL={url}
-          style={{
-            width: 200,
-            height: 200,
-          }}
-          objectFit="cover"
-          zOrder={1}
-        />
+      {url && stream && (
+        <View style={{
+          width: 300,
+          height: 300,
+          backgroundColor: '#000',
+          overflow: 'hidden',
+          borderRadius: 10,
+          borderWidth: 1,
+          borderColor: '#ccc',
+          marginTop: 20,
+        }}>
+          <RTCView
+            streamURL={url}
+            style={{
+              flex: 1,
+              backgroundColor: 'transparent',
+            }}
+            objectFit="contain"
+            zOrder={1}
+            mirror={false}
+          />
+        </View>
       )}
     </View>
   );
@@ -197,14 +257,17 @@ const requestMicrophonePermission = async () => {
 };
 
 const requestNotificationPermission = async () => {
-  if (Platform.OS === 'android' && Platform.Version >= 33) {
-    const settings = await notifee.getNotificationSettings();
-
-    if (settings.authorizationStatus === 0) {
-      const status = await notifee.requestPermission();
-      if (status.authorizationStatus !== 1) {
-        console.warn('Notification permission not granted');
+  try {
+    if (Platform.OS === 'android') {
+      // Request general notification permission
+      const settings = await notifee.requestPermission();
+      
+      if (settings.authorizationStatus !== 1) {
+        throw new Error('Notification permission not granted');
       }
     }
+  } catch (error) {
+    console.error('Error requesting notification permission:', error);
+    throw error;
   }
 };

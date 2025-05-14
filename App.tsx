@@ -23,6 +23,7 @@ import {
   createNotificationChannels,
   showDisplayProjectionNotificaion,
   stopForegroundService,
+  showPreScreenShareNotification,
 } from './createNotificationChannel';
 registerGlobals();
 
@@ -38,28 +39,28 @@ function App(): React.JSX.Element {
   const [url, setUrl] = useState<null | string>(null);
 
   const produceScreenMedia = async () => {
-    const projection_perm = await AsyncStorage.getItem('display_media_perm');
+    try {
+      // First show the foreground notification
+      await showDisplayProjectionNotificaion();
 
-    /// try commenting this "if" block. the app will crash for the first time.
+      // Then request screen sharing permission and get the stream
+      const screenStream = await mediaDevices.getDisplayMedia();
+      const videoTrack = screenStream.getVideoTracks()[0];
+      
+      // Set up cleanup when user stops sharing
+      (videoTrack as any).onended = async () => {
+        setUrl(null);
+        screenStream.release();
+        await stopForegroundService();
+      };
 
-    // if you successfully share your screen atleast one time. we wont get any crashes.
-
-    if (!projection_perm) {
-      const tempStream = await mediaDevices.getDisplayMedia();
-      tempStream.release();
-      await AsyncStorage.setItem('display_media_perm', JSON.stringify(true));
+      const url = screenStream.toURL();
+      setUrl(url);
+      console.log('screen sharing started======>>>>>>');
+    } catch (error) {
+      console.error('Error in screen sharing:', error);
+      await stopForegroundService();
     }
-
-    // The crash is happening while showing the foreground notification.
-    // checkout AndroidManifest.xml file ,
-    //  refer: https://react-native-webrtc.github.io/handbook/guides/extra-steps/android.html
-    await showDisplayProjectionNotificaion();
-
-    const screenStream = await mediaDevices.getDisplayMedia();
-    const videoTrack = screenStream.getVideoTracks()[0];
-    const url = screenStream.toURL();
-    setUrl(url);
-    console.log('screen shareing started======>>>>>>');
   };
 
   useEffect(() => {

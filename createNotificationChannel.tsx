@@ -23,14 +23,34 @@ export const createNotificationChannels = async () => {
   );
 };
 
+// Show initial notification before screen sharing
+export async function showPreScreenShareNotification() {
+  try {
+    await notifee.displayNotification({
+      title: 'Preparing Screen Capture',
+      body: 'Please grant screen sharing permission...',
+      android: {
+        channelId: 'screen_capture',
+        ongoing: false,
+        smallIcon: 'react_native',
+        autoCancel: true,
+      },
+    });
+  } catch (err) {
+    console.log(err);
+  }
+}
+
 export async function showDisplayProjectionNotificaion() {
   try {
+    // Cancel any existing notifications first
+    await notifee.cancelAllNotifications();
+    
     await notifee.displayNotification({
       title: 'Screen Capture',
       body: 'This notification will be here until you stop capturing.',
       android: {
         channelId: 'screen_capture',
-
         asForegroundService: true,
         ongoing: true,
         smallIcon: 'react_native',

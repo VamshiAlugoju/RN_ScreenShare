@@ -1,6 +1,10 @@
 package com.myproject
 
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -10,12 +14,14 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import android.view.Display
+import androidx.core.app.NotificationCompat
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.io.ByteArrayOutputStream
@@ -37,7 +43,7 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
     
     private val SCREEN_CAPTURE_REQUEST_CODE = 1000
     private val TAG = "ScreenSharingModule"
-    private val FRAME_RATE_MS = 100L // Capture frame every 100ms (10 FPS)
+    private val FRAME_RATE_MS = 333L // Capture frame every 333ms (3 FPS) for fast but smooth display
     
     override fun getName(): String {
         return "ScreenSharingModule"
@@ -105,6 +111,21 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
                 return
             }
 
+            // Start foreground service BEFORE creating MediaProjection
+            try {
+                startForegroundService()
+                Log.d(TAG, "Foreground service started")
+                
+                // Give the system a moment to register the foreground service
+                // This is crucial for MediaProjection to recognize the service
+                Thread.sleep(500) // 500ms delay
+                Log.d(TAG, "Waited for foreground service registration")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start foreground service", e)
+                promise.reject("FOREGROUND_SERVICE_FAILED", "Failed to start foreground service: ${e.message}")
+                return
+            }
+
             // Create MediaProjection callback
             mediaProjectionCallback = object : MediaProjection.Callback() {
                 override fun onStop() {
@@ -115,29 +136,48 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
                 
                 override fun onCapturedContentResize(width: Int, height: Int) {
                     Log.d(TAG, "MediaProjection content resized: ${width}x${height}")
-                    // Handle content resize if needed
                 }
                 
                 override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
                     Log.d(TAG, "MediaProjection content visibility changed: $isVisible")
-                    // Handle visibility changes if needed
                 }
             }
 
             // Create media projection from the permission result
-            mediaProjection = mediaProjectionManager!!.getMediaProjection(resultCode, screenCaptureData!!)
+            try {
+                mediaProjection = mediaProjectionManager!!.getMediaProjection(resultCode, screenCaptureData!!)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create MediaProjection", e)
+                promise.reject("MEDIA_PROJECTION_CREATION_FAILED", "Failed to create MediaProjection: ${e.message}")
+                return
+            }
             
             if (mediaProjection == null) {
-                Log.e(TAG, "Failed to create MediaProjection")
+                Log.e(TAG, "MediaProjection is null after creation")
                 promise.reject("MEDIA_PROJECTION_NULL", "Failed to create MediaProjection")
                 return
             }
 
             // Register the callback BEFORE starting capture (required for API 34+)
-            mediaProjection!!.registerCallback(mediaProjectionCallback!!, Handler(Looper.getMainLooper()))
-            Log.d(TAG, "MediaProjection callback registered")
+            try {
+                mediaProjection!!.registerCallback(mediaProjectionCallback!!, Handler(Looper.getMainLooper()))
+                Log.d(TAG, "MediaProjection callback registered")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to register MediaProjection callback", e)
+                promise.reject("CALLBACK_REGISTRATION_FAILED", "Failed to register callback: ${e.message}")
+                return
+            }
 
-            setupVirtualDisplay()
+            // Setup virtual display with error handling
+            try {
+                setupVirtualDisplay()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to setup virtual display", e)
+                cleanupResources()
+                promise.reject("VIRTUAL_DISPLAY_SETUP_FAILED", "Failed to setup virtual display: ${e.message}")
+                return
+            }
+
             isCapturing = true
             
             Log.d(TAG, "Screen capture started successfully")
@@ -254,12 +294,16 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
         try {
             Log.d(TAG, "Setting up virtual display")
             
-            val displayManager = reactApplicationContext.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-            val display = displayManager.getDisplay(Display.DEFAULT_DISPLAY)
+            val displayManager = reactApplicationContext.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            if (displayManager == null) {
+                Log.e(TAG, "DisplayManager is null")
+                throw Exception("DisplayManager is null")
+            }
             
+            val display = displayManager.getDisplay(Display.DEFAULT_DISPLAY)
             if (display == null) {
                 Log.e(TAG, "Default display is null")
-                return
+                throw Exception("Default display is null")
             }
             
             val displayMetrics = DisplayMetrics()
@@ -271,22 +315,56 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
 
             Log.d(TAG, "Display metrics: ${width}x${height}, density: $density")
 
-            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
-            
-            virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "ScreenCapture",
-                width, height, density,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader!!.surface, null, null
-            )
+            if (width <= 0 || height <= 0) {
+                Log.e(TAG, "Invalid display dimensions: ${width}x${height}")
+                throw Exception("Invalid display dimensions: ${width}x${height}")
+            }
 
-            imageReader?.setOnImageAvailableListener({ reader ->
-                // Image is available for processing
-                Log.v(TAG, "New frame available")
-                sendEvent("ScreenFrameAvailable", null)
-            }, Handler(Looper.getMainLooper()))
+            try {
+                imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create ImageReader", e)
+                throw Exception("Failed to create ImageReader: ${e.message}")
+            }
             
-            Log.d(TAG, "Virtual display setup completed")
+            if (imageReader == null) {
+                Log.e(TAG, "ImageReader is null after creation")
+                throw Exception("ImageReader is null after creation")
+            }
+
+            if (mediaProjection == null) {
+                Log.e(TAG, "MediaProjection is null when creating virtual display")
+                throw Exception("MediaProjection is null")
+            }
+            
+            try {
+                virtualDisplay = mediaProjection!!.createVirtualDisplay(
+                    "ScreenCapture",
+                    width, height, density,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    imageReader!!.surface, null, null
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create VirtualDisplay", e)
+                throw Exception("Failed to create VirtualDisplay: ${e.message}")
+            }
+
+            if (virtualDisplay == null) {
+                Log.e(TAG, "VirtualDisplay is null after creation")
+                throw Exception("VirtualDisplay is null after creation")
+            }
+
+            try {
+                imageReader!!.setOnImageAvailableListener({ reader ->
+                    Log.v(TAG, "New frame available")
+                    sendEvent("ScreenFrameAvailable", null)
+                }, Handler(Looper.getMainLooper()))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to set ImageReader listener", e)
+                throw Exception("Failed to set ImageReader listener: ${e.message}")
+            }
+            
+            Log.d(TAG, "Virtual display setup completed successfully")
             
         } catch (e: Exception) {
             Log.e(TAG, "Error setting up virtual display", e)
@@ -350,13 +428,13 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
                     )
                     bitmap.copyPixelsFromBuffer(buffer)
 
-                    // Scale down bitmap for better performance (optional)
+                    // Scale down bitmap for better performance but maintain quality
                     val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 
-                        bitmap.width / 2, bitmap.height / 2, true)
+                        (bitmap.width * 0.75).toInt(), (bitmap.height * 0.75).toInt(), true)
 
-                    // Convert bitmap to base64
+                    // Convert bitmap to base64 with higher quality
                     val outputStream = ByteArrayOutputStream()
-                    scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 70, outputStream)
+                    scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
                     val byteArray = outputStream.toByteArray()
                     val base64String = Base64.encodeToString(byteArray, Base64.NO_WRAP)
 
@@ -402,6 +480,9 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
         mediaProjection?.stop()
         mediaProjection = null
         
+        // Stop the foreground service
+        stopForegroundService()
+        
         Log.d(TAG, "Resource cleanup completed")
     }
 
@@ -415,24 +496,92 @@ class ScreenSharingModule(reactContext: ReactApplicationContext) : ReactContextB
         }
     }
 
+    private fun startForegroundService() {
+        try {
+            Log.d(TAG, "Starting foreground service for MediaProjection")
+            
+            val notificationManager = reactApplicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            
+            // Create notification channel for Android 8.0+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channelId = "screen_capture"
+                val channelName = "Screen Capture"
+                val importance = NotificationManager.IMPORTANCE_LOW
+                val channel = NotificationChannel(channelId, channelName, importance).apply {
+                    description = "Screen capture service"
+                    setShowBadge(false)
+                    enableLights(false)
+                    enableVibration(false)
+                }
+                notificationManager.createNotificationChannel(channel)
+            }
+            
+            // Create notification
+            val notification = NotificationCompat.Builder(reactApplicationContext, "screen_capture")
+                .setContentTitle("Screen Capture")
+                .setContentText("Screen capture is active")
+                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+            
+            // Start foreground service
+            val serviceIntent = Intent(reactApplicationContext, ScreenCaptureService::class.java)
+            serviceIntent.putExtra("notification", notification)
+            serviceIntent.putExtra("notificationId", 1001)
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                reactApplicationContext.startForegroundService(serviceIntent)
+            } else {
+                reactApplicationContext.startService(serviceIntent)
+            }
+            
+            Log.d(TAG, "Foreground service started successfully")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground service", e)
+            throw e
+        }
+    }
+
+    private fun stopForegroundService() {
+        try {
+            Log.d(TAG, "Stopping foreground service")
+            val serviceIntent = Intent(reactApplicationContext, ScreenCaptureService::class.java)
+            reactApplicationContext.stopService(serviceIntent)
+            Log.d(TAG, "Foreground service stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping foreground service", e)
+        }
+    }
+
     companion object {
         private var screenSharePromise: Promise? = null
         private var screenCaptureData: Intent? = null
         private const val TAG = "ScreenSharingModule"
         
         fun handleActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-            Log.d(TAG, "handleActivityResult: requestCode=$requestCode, resultCode=$resultCode")
+            Log.d(TAG, "handleActivityResult: requestCode=$requestCode, resultCode=$resultCode, data=$data")
             
             if (requestCode == 1000) {
-                if (resultCode == Activity.RESULT_OK && data != null) {
-                    Log.d(TAG, "Screen capture permission granted")
-                    screenCaptureData = data
-                    screenSharePromise?.resolve(resultCode)
-                } else {
-                    Log.w(TAG, "Screen capture permission denied")
-                    screenSharePromise?.reject("PERMISSION_DENIED", "Screen capture permission denied")
+                try {
+                    if (resultCode == Activity.RESULT_OK && data != null) {
+                        Log.d(TAG, "Screen capture permission granted")
+                        screenCaptureData = data
+                        screenSharePromise?.resolve(resultCode)
+                    } else {
+                        Log.w(TAG, "Screen capture permission denied or data is null. ResultCode: $resultCode, Data: $data")
+                        screenSharePromise?.reject("PERMISSION_DENIED", "Screen capture permission denied")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error handling activity result", e)
+                    screenSharePromise?.reject("ACTIVITY_RESULT_ERROR", "Error handling permission result: ${e.message}")
+                } finally {
+                    screenSharePromise = null
                 }
-                screenSharePromise = null
+            } else {
+                Log.d(TAG, "Ignoring activity result for request code: $requestCode")
             }
         }
     }

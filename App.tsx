@@ -1,4 +1,4 @@
-import React, {useEffect, useState, useCallback} from 'react';
+import React, {useEffect, useState, useCallback, useRef} from 'react';
 import {
   Text,
   useColorScheme,
@@ -29,6 +29,9 @@ function App(): React.JSX.Element {
   const [frameCount, setFrameCount] = useState(0);
   const [lastFrameTime, setLastFrameTime] = useState<number>(0);
   
+  // Simplified frame handling - direct display with reduced updates
+  const frameCountRef = useRef(0);
+  
   const screenSharingManager = ScreenSharingManager.getInstance();
   const { width: screenWidth } = Dimensions.get('window');
   const liveViewWidth = screenWidth - 40;
@@ -42,24 +45,51 @@ function App(): React.JSX.Element {
 
   const startNativeScreenShare = async () => {
     try {
-      // Start foreground notification first
-      await showDisplayProjectionNotificaion();
+      console.log('Starting native screen share...');
       
-      // Request permission and start capture
+      // Request permission and start capture (foreground service is now handled internally)
       await screenSharingManager.requestPermissionAndStartCapture();
+      
       setIsCapturing(true);
-
-      await screenSharingManager.startLiveStreaming();
-      setIsLiveStreaming(true);
-      setFrameCount(0);
       
       console.log('Native screen sharing started successfully');
-      Alert.alert('Success', 'Screen sharing started successfully');
-    } catch (error) {
+      Alert.alert('Success', 'Screen sharing started successfully! You can now start live streaming.');
+    } catch (error: any) {
       console.error('Failed to start native screen sharing:', error);
-      Alert.alert('Error', `Failed to start screen sharing: ${error}`);
-      // Stop notification if screen sharing failed
-      await stopForegroundService();
+      
+      // Provide specific error messages based on error type
+      let errorMessage = 'Failed to start screen sharing';
+      if (error.code === 'PERMISSION_DENIED') {
+        errorMessage = 'Screen capture permission was denied. Please try again and grant permission.';
+      } else if (error.code === 'ACTIVITY_NOT_AVAILABLE') {
+        errorMessage = 'App is not in foreground. Please try again.';
+      } else if (error.code === 'MEDIA_PROJECTION_CREATION_FAILED') {
+        errorMessage = 'Failed to initialize screen capture. Please restart the app and try again.';
+      } else if (error.code === 'VIRTUAL_DISPLAY_SETUP_FAILED') {
+        errorMessage = 'Failed to setup screen capture display. Please try again.';
+      } else if (error.code === 'FOREGROUND_SERVICE_FAILED') {
+        errorMessage = 'Failed to start background service. Please check app permissions.';
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
+      Alert.alert(
+        'Screen Sharing Error', 
+        errorMessage,
+        [
+          { text: 'OK', style: 'default' },
+          { 
+            text: 'Try Again', 
+            onPress: () => {
+              setTimeout(() => {
+                startNativeScreenShare();
+              }, 1000);
+            }
+          }
+        ]
+      );
+      
+      setIsCapturing(false);
     }
   };
 
@@ -73,6 +103,7 @@ function App(): React.JSX.Element {
       await screenSharingManager.startLiveStreaming();
       setIsLiveStreaming(true);
       setFrameCount(0);
+      frameCountRef.current = 0;
       
       console.log('Live streaming started successfully');
       Alert.alert('Success', 'Live streaming started!');
@@ -99,7 +130,6 @@ function App(): React.JSX.Element {
   const stopNativeScreenShare = async () => {
     try {
       await screenSharingManager.stopCapture();
-      await stopForegroundService();
       setIsCapturing(false);
       setIsLiveStreaming(false);
       setScreenshotBase64(null);
@@ -131,11 +161,16 @@ function App(): React.JSX.Element {
     }
   };
 
-  // Live frame handler
+  // Live frame handler - show every 2nd frame for fast but smooth display
   const handleLiveFrame = useCallback((frameData: string) => {
-    setLiveFrameBase64(frameData);
-    setFrameCount(prev => prev + 1);
+    frameCountRef.current += 1;
+    setFrameCount(frameCountRef.current);
     setLastFrameTime(Date.now());
+    
+    // Only update display every 2nd frame for fast but smooth experience
+    if (frameCountRef.current % 2 === 0) {
+      setLiveFrameBase64(frameData);
+    }
   }, []);
 
   useEffect(() => {
@@ -178,7 +213,6 @@ function App(): React.JSX.Element {
     screenSharingManager.addLiveFrameListener(handleLiveFrame);
 
     return () => {
-      stopForegroundService();
       startedListener.remove();
       stoppedListener.remove();
       frameListener.remove();
@@ -341,6 +375,7 @@ function App(): React.JSX.Element {
               padding: 5,
             }}>
               <Image
+                key={`live-frame-${frameCount}`}
                 source={{ uri: `data:image/jpeg;base64,${liveFrameBase64}` }}
                 style={{
                   width: liveViewWidth,
@@ -349,6 +384,8 @@ function App(): React.JSX.Element {
                   resizeMode: 'contain',
                   borderRadius: 5,
                 }}
+                fadeDuration={0}
+                resizeMethod="resize"
               />
             </View>
             <Text style={{ 
